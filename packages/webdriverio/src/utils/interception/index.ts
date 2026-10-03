@@ -14,6 +14,7 @@ import type { WaitForOptions } from '../../types.js'
 const log = logger('WebDriverInterception')
 
 const DEFAULT_SPY_COLLECTED_BODY_SIZE = 10 * 1024 * 1024
+const RESPONSE_BODY_WAIT = 2000
 
 let hasSubscribedToEvents = false
 
@@ -701,20 +702,38 @@ export default class WebDriverInterception {
         /**
          * try populate response body
          */
-        try {
-            const { bytes } = await this.#browser.networkGetData({
-                request: response.request.request,
-                dataType: 'response'
-            })
-
+        const requestId = response.request.request
+        const bodyRead = this.#browser.networkGetData({
+            request: requestId,
+            dataType: 'response'
+        }).then(({ bytes }) => {
             if (bytes) {
                 call.body = bytes.value
             }
-        } catch (err: unknown) {
-            log.debug(`Failed to get response body for ${response.request.request}: ${(err as Error).message}`)
+        }, (err: unknown) => {
+            log.debug(`Failed to get response body for ${requestId}: ${(err as Error).message}`)
+        })
+
+        /**
+         * Firefox leaves `network.getData` unanswered when it did not capture
+         * the body, e.g. for some top-level documents. Don't let
+         * `waitForResponse()` wait for it forever: the response counts as
+         * received after a while, and the body is still added if it arrives.
+         */
+        let bodyWait: ReturnType<typeof setTimeout> | undefined
+        const bodyUnanswered = new Promise<void>((resolve) => {
+            bodyWait = setTimeout(() => {
+                log.warn(`The browser did not return the response body of request ${requestId} within ${RESPONSE_BODY_WAIT}ms, continuing without it`)
+                resolve()
+            }, RESPONSE_BODY_WAIT)
+        })
+
+        try {
+            await Promise.race([bodyRead, bodyUnanswered])
         } finally {
+            clearTimeout(bodyWait)
             this.#hasOneResponseCollected = true
-            this.#requestPostData.delete(response.request.request)
+            this.#requestPostData.delete(requestId)
         }
     }
 

@@ -1394,6 +1394,41 @@ describe('WebDriverInterception', () => {
                 await waitForAsyncHandlers()
                 expect(mock.hasAtLeastOneResponseReceived).toBe(true)
             })
+
+            it('should return true if the browser never answers the response body read', async () => {
+                let resolveGetData: (value: unknown) => void
+                const getDataPromise = new Promise((resolve) => {
+                    resolveGetData = resolve
+                })
+                const browser = getResponseCollectionBrowserMock({ maxSpyCollectedBodySize: 1024 }, {
+                    networkGetData: vi.fn().mockImplementation(({ dataType }) => dataType === 'response'
+                        ? getDataPromise
+                        : Promise.reject(new Error('no such network data')))
+                })
+                const mock = await WebDriverInterception.initiate('http://test.com/**', {}, browser)
+                const request = getResponseCollectionRequestStub()
+
+                vi.useFakeTimers()
+                try {
+                    browser.emit('network.responseStarted', request)
+                    browser.emit('network.responseCompleted', { ...request, isBlocked: false } as Partial<local.NetworkResponseCompletedParameters> as local.NetworkResponseCompletedParameters)
+
+                    await vi.advanceTimersByTimeAsync(1999)
+                    expect(mock.hasAtLeastOneResponseReceived).toBe(false)
+
+                    await vi.advanceTimersByTimeAsync(1)
+                    expect(mock.hasAtLeastOneResponseReceived).toBe(true)
+                    expect(mock.calls[0].body).toBeUndefined()
+                } finally {
+                    vi.useRealTimers()
+                }
+
+                resolveGetData!({
+                    bytes: { type: 'string', value: 'late-body' }
+                })
+                await waitForAsyncHandlers()
+                expect(mock.calls[0].body).toBe('late-body')
+            })
         })
     })
 
