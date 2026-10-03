@@ -31,7 +31,17 @@ export async function getTemplate(options: WebdriverIO.BrowserRunnerOptions, env
     try {
         const sourceMapSupportDir = await resolve('source-map-support', import.meta.url)
         sourceMapScript = /*html*/`<script src="/@fs/${url.fileURLToPath(path.dirname(sourceMapSupportDir))}/browser-source-map-support.js"></script>`
-        sourceMapSetupCommand = 'sourceMapSupport.install()'
+        /**
+         * source-map-support reads a file with a synchronous request. While a
+         * mock of this page intercepts requests, that request stays paused
+         * until the page releases it, which the blocked page never does. Skip
+         * the lookup then, so the frame keeps its generated position.
+         */
+        sourceMapSetupCommand = `sourceMapSupport.install({
+                    retrieveSourceMap: (source) => window.__wdioNetworkIntercepts__?.size
+                        ? { url: source, map: '{"version":3,"sources":[],"names":[],"mappings":""}' }
+                        : null
+                })`
     } catch (err) {
         log.error(`Failed to setup source-map-support: ${(err as Error).message}`)
     }

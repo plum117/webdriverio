@@ -38,7 +38,11 @@ exports[`getTemplate > renders template correctly 1`] = `
             <script type="module" src="@wdio/browser-runner/third_party/mocha.js"></script>
             <script src="/@fs//foo/bar/browser-source-map-support.js"></script>
             <script type="module">
-                sourceMapSupport.install()
+                sourceMapSupport.install({
+                    retrieveSourceMap: (source) => window.__wdioNetworkIntercepts__?.size
+                        ? { url: source, map: '{"version":3,"sources":[],"names":[],"mappings":""}' }
+                        : null
+                })
 
                 /**
                  * Inject environment variables

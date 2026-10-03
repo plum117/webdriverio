@@ -2,7 +2,7 @@
 
 import { vi, describe, it, beforeAll, afterAll, expect } from 'vitest'
 import { getWdioKind } from '@wdio/utils'
-import { commandResult, showPopupWarning, sanitizeConsoleArgs, toViteFsUrl } from '../../src/browser/utils.js'
+import { commandResult, showPopupWarning, sanitizeConsoleArgs, toViteFsUrl, trackNetworkIntercepts } from '../../src/browser/utils.js'
 
 describe('browser utils', () => {
     const consoleWarn = console.warn.bind(console)
@@ -68,6 +68,37 @@ describe('browser utils', () => {
             '[object Promise]',
             '() => {\n      }'
         ])
+    })
+
+    it('trackNetworkIntercepts keeps the intercepts of the page', async () => {
+        const addIntercept = vi.fn()
+            .mockResolvedValueOnce({ intercept: 'intercept-1' })
+            .mockResolvedValueOnce({ intercept: 'intercept-2' })
+        const removeIntercept = vi.fn()
+            .mockResolvedValueOnce({})
+            .mockRejectedValueOnce(new Error('no such intercept'))
+        const prototype: PropertyDescriptorMap = {
+            networkAddIntercept: { value: addIntercept },
+            networkRemoveIntercept: { value: removeIntercept }
+        }
+        trackNetworkIntercepts(prototype)
+
+        const params = { phases: ['beforeRequestSent'] }
+        await expect(prototype.networkAddIntercept.value(params)).resolves.toEqual({ intercept: 'intercept-1' })
+        await prototype.networkAddIntercept.value(params)
+        expect(addIntercept).toBeCalledWith(params)
+        expect([...window.__wdioNetworkIntercepts__!]).toEqual(['intercept-1', 'intercept-2'])
+
+        await prototype.networkRemoveIntercept.value({ intercept: 'intercept-1' })
+        await expect(prototype.networkRemoveIntercept.value({ intercept: 'intercept-2' })).rejects.toThrow('no such intercept')
+        expect(window.__wdioNetworkIntercepts__!.size).toBe(0)
+    })
+
+    it('trackNetworkIntercepts leaves a prototype without network commands alone', () => {
+        const prototype: PropertyDescriptorMap = {}
+        trackNetworkIntercepts(prototype)
+        expect(prototype).toEqual({})
+        expect(window.__wdioNetworkIntercepts__!.size).toBe(0)
     })
 
     afterAll(() => {
