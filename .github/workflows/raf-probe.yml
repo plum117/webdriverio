@@ -6,7 +6,22 @@ on:
 permissions:
   contents: read
 jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/workflows/actions/get-core-dependencies
+      - run: pnpm run setup
+        shell: bash
+        env:
+          NODE_ENV: production
+      - uses: ./.github/workflows/actions/upload-archive
+        with:
+          name: webdriverio
+          output: webdriverio-build.zip
+          paths: packages/*/build packages/*/cjs
   probe:
+    needs: build
     name: ${{ matrix.cfg.suite }} ${{ matrix.cfg.os }} ${{ matrix.cfg.browser }} ${{ matrix.rep }}
     timeout-minutes: 45
     strategy:
@@ -14,22 +29,20 @@ jobs:
       matrix:
         rep: [1, 2]
         cfg:
-          - { suite: testrunner, os: macos-15, browser: chrome }
           - { suite: testrunner, os: windows-latest, browser: chrome }
-          - { suite: launch, os: macos-15, browser: firefox }
-          - { suite: launch, os: macos-15, browser: chrome }
           - { suite: launch, os: windows-latest, browser: firefox }
           - { suite: launch, os: windows-latest, browser: chrome }
-          - { suite: launch, os: ubuntu-latest, browser: firefox }
-          - { suite: launch, os: ubuntu-latest, browser: chrome }
     runs-on: ${{ matrix.cfg.os }}
     env:
       RAF_PROBE_FILE: ${{ github.workspace }}/raf-out/real.jsonl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/workflows/actions/get-core-dependencies
-      - run: pnpm run setup
-        shell: bash
+      - uses: ./.github/workflows/actions/download-archive
+        with:
+          name: webdriverio
+          path: .
+          filename: webdriverio-build.zip
       - name: suite with a concurrent frame probe
         shell: bash
         env:
