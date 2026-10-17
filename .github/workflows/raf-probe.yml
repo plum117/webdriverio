@@ -1,0 +1,52 @@
+name: rAF probe
+on:
+  push:
+    branches: [probe/raf-latency]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    name: ${{ matrix.cfg.suite }} ${{ matrix.cfg.os }} ${{ matrix.cfg.browser }} ${{ matrix.rep }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        rep: [1, 2]
+        cfg:
+          - { suite: testrunner, os: macos-15, browser: chrome }
+          - { suite: testrunner, os: windows-latest, browser: chrome }
+          - { suite: launch, os: macos-15, browser: firefox }
+          - { suite: launch, os: macos-15, browser: chrome }
+          - { suite: launch, os: windows-latest, browser: firefox }
+          - { suite: launch, os: windows-latest, browser: chrome }
+          - { suite: launch, os: ubuntu-latest, browser: firefox }
+          - { suite: launch, os: ubuntu-latest, browser: chrome }
+    runs-on: ${{ matrix.cfg.os }}
+    env:
+      RAF_PROBE_FILE: ${{ github.workspace }}/raf-out/real.jsonl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/workflows/actions/get-core-dependencies
+      - run: pnpm run setup
+        shell: bash
+      - name: suite with a concurrent frame probe
+        shell: bash
+        env:
+          WDIO_E2E_BROWSERS: ${{ matrix.cfg.browser }}
+        run: |
+          mkdir -p raf-out
+          node scripts/raf-probe/latency-ci.mjs ${{ matrix.cfg.browser }} raf-out/synthetic.jsonl &
+          P=$!
+          if [ "${{ matrix.cfg.suite }}" = testrunner ]; then
+            pnpm run test:e2e:testrunner || echo "SUITE FAILED: testrunner"
+          else
+            pnpm run test:e2e:webdriver || echo "SUITE FAILED: webdriver"
+          fi
+          touch raf-out/STOP; wait $P || true
+          node scripts/raf-probe/summary.mjs raf-out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: raf-${{ matrix.cfg.suite }}-${{ matrix.cfg.os }}-${{ matrix.cfg.browser }}-${{ matrix.rep }}
+          path: raf-out/*.jsonl

@@ -1,9 +1,10 @@
+/* oxlint-disable */
 /**
  * check if element is stable (an element is considered unstable when it is animating/moving)
  * @param  {HTMLElement} elem  element to check
  * @return {Promise<boolean>}
  */
-export default async function isElementStable(elem: HTMLElement): Promise<boolean> {
+export default async function isElementStable(elem: HTMLElement): Promise<any> {
     /**
      * A WebDriver BiDi session gives a script an element that the page removed, or (in
      * Firefox) an element of the document of a page that was navigated away from, where a
@@ -25,20 +26,23 @@ export default async function isElementStable(elem: HTMLElement): Promise<boolea
          * render; a busy browser can render none for more than 100 ms).
          * Without rendering, nothing can animate either.
          */
+        const t0 = performance.now()
+        let byTimer = false
         await new Promise<void>((resolve) => {
-            const timer = setTimeout(resolve, 1000)
+            const timer = setTimeout(() => { byTimer = true; resolve() }, 5000)
             requestAnimationFrame(() => requestAnimationFrame(() => {
                 clearTimeout(timer)
                 resolve()
             }))
         })
+        const probe = { waited: performance.now() - t0, byTimer, rect: elem.getBoundingClientRect().toJSON(), vw: innerWidth, vh: innerHeight, top: window === window.top }
         const currentPosition = elem.getBoundingClientRect()
         for (const prop in previousPosition) {
             if (previousPosition[(prop as keyof DOMRect)] !== currentPosition[(prop as keyof DOMRect)]) {
-                return false
+                return { stable: false, ...probe }
             }
         }
-        return true
+        return { stable: true, ...probe }
     } catch {
         return false
     }

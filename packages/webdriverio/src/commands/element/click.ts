@@ -1,3 +1,5 @@
+/* oxlint-disable */
+import { appendFileSync } from 'node:fs'
 import logger from '@wdio/logger'
 
 import { getBrowserObject } from '@wdio/utils'
@@ -178,7 +180,7 @@ async function workaround(element: WebdriverIO.Element) {
  */
 async function bringIntoView(browser: WebdriverIO.Browser, element: WebdriverIO.Element, offset: { x: number, y: number }) {
     try {
-        await browser.execute((elem: HTMLElement, offset: { x: number, y: number }) => {
+        const probe: any = await browser.execute((elem: HTMLElement, offset: { x: number, y: number }) => {
             const hitTest = () => {
                 const rect = elem.getClientRects()[0]
                 if (!rect) {
@@ -234,12 +236,15 @@ async function bringIntoView(browser: WebdriverIO.Browser, element: WebdriverIO.
             if (document.visibilityState === 'hidden') {
                 return
             }
-            return new Promise<void>((resolve) => {
-                requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-                // only if no frame comes: a busy browser can render none for more than 100 ms
-                setTimeout(resolve, 1000)
+            const t0 = performance.now()
+            return new Promise<any>((resolve) => {
+                requestAnimationFrame(() => requestAnimationFrame(() => resolve({ waited: performance.now() - t0, byTimer: false })))
+                setTimeout(() => resolve({ waited: performance.now() - t0, byTimer: true }), 5000)
             })
         }, element as unknown as HTMLElement, offset)
+        if (probe && process.env.RAF_PROBE_FILE) {
+            appendFileSync(process.env.RAF_PROBE_FILE, JSON.stringify({ kind: 'click', browser: (browser.capabilities as any).browserName, ...probe, at: Date.now() }) + '\n')
+        }
     } catch (err) {
         log.debug(`Could not scroll the element into view before the click: ${(err as Error).message}`)
     }

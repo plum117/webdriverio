@@ -1,3 +1,5 @@
+/* oxlint-disable */
+import { appendFileSync } from "node:fs"
 import { getBrowserObject } from '@wdio/utils'
 import isElementStable from '../../scripts/isElementStable.js'
 
@@ -80,5 +82,10 @@ export async function isStable (this: WebdriverIO.Element) {
         throw new Error('The `isStable` command is only available for desktop and mobile browsers.')
     }
 
-    return await browser.execute(isElementStable, this as unknown as HTMLElement)
+    const r = await browser.execute(isElementStable, this as unknown as HTMLElement)
+    if (r && typeof r === 'object') {
+        if (process.env.RAF_PROBE_FILE) appendFileSync(process.env.RAF_PROBE_FILE, JSON.stringify({ kind: 'isStable', browser: (browser.capabilities as any).browserName, ...r, at: Date.now() }) + '\n')
+        return r.stable
+    }
+    return r
 }
