@@ -43,14 +43,31 @@ const subscribedSessions = new WeakMap<WebdriverIO.Browser, string | undefined>(
  * is recorded on the same event, and a mock that declines waits for it. A
  * microtask is too early: it runs before the body arrives and would continue
  * the request out from under the mock that still means to abort or overwrite it.
+ *
+ * A mock of a tab or a parallel test wins over a session-wide mock that also
+ * handles the request, so it can override that mock in its context. The
+ * session-wide mock records its claim as a deferred decision on the event and
+ * claims after the scoped mocks decided. It waits only for the `postData` reads
+ * of scoped mocks: a scoped mock claims at once, so it never waits for it.
  */
 const RELEASED = Symbol('wdio.interception.released')
 const PENDING = Symbol('wdio.interception.pending')
+const SCOPED_PENDING = Symbol('wdio.interception.scoped-pending')
+const DEFERRED = Symbol('wdio.interception.deferred')
+type DecisionKind = typeof PENDING | typeof SCOPED_PENDING | typeof DEFERRED
+
+/**
+ * The intercepts of mocks of a tab or a parallel test, per browser, so a session-wide
+ * mock only defers its claim when one of them blocked the request too.
+ */
+const scopedIntercepts = new WeakMap<WebdriverIO.Browser, Set<string>>()
 
 type InterceptedEvent = { intercepts?: string[] }
 type MarkedEvent = InterceptedEvent & {
     [RELEASED]?: true
     [PENDING]?: Promise<void>[]
+    [SCOPED_PENDING]?: Promise<void>[]
+    [DEFERRED]?: Promise<void>[]
 }
 
 function isContested(event: InterceptedEvent) {
@@ -76,9 +93,9 @@ function claim(event: InterceptedEvent) {
  * A declining mock waits for these before it releases. The rejection is
  * swallowed here so a failed body lookup still lets someone else release.
  */
-function trackPending(event: InterceptedEvent, decision: Promise<unknown>) {
+function trackPending(event: InterceptedEvent, decision: Promise<unknown>, kind: DecisionKind = PENDING) {
     const marked = event as MarkedEvent
-    const pending = marked[PENDING] ?? (marked[PENDING] = [])
+    const pending = marked[kind] ?? (marked[kind] = [])
     const settled = decision.then(() => undefined, () => undefined)
     pending.push(settled)
     void settled.finally(() => {
@@ -89,9 +106,9 @@ function trackPending(event: InterceptedEvent, decision: Promise<unknown>) {
     })
 }
 
-function pendingDecisions(event: InterceptedEvent) {
-    const pending = (event as MarkedEvent)[PENDING]
-    return pending ? pending.slice() : []
+function pendingDecisions(event: InterceptedEvent, kinds: DecisionKind[] = [PENDING, SCOPED_PENDING, DEFERRED]) {
+    const marked = event as MarkedEvent
+    return kinds.flatMap((kind) => marked[kind]?.slice() ?? [])
 }
 
 type RespondBodyValue = string | JsonCompatible | ArrayBufferView | ArrayBuffer
@@ -306,6 +323,10 @@ export default class WebDriverInterception {
 
         const mock = new WebDriverInterception(pattern, interception.intercept, filterOptions, browser, isCollectingNetworkData, scope.sessionKey, scope.contexts)
         mock.#test = scope.test
+        if (scope.contexts?.length) {
+            const scoped = scopedIntercepts.get(browser) ?? new Set<string>()
+            scopedIntercepts.set(browser, scoped.add(interception.intercept))
+        }
         await mock.#seedDescendantContexts()
         return mock
     }
@@ -366,8 +387,19 @@ export default class WebDriverInterception {
             return call()
         }
 
-        if (handling) {
+        const scoped = scopedIntercepts.get(this.#browser)
+        if (handling && (this.#contexts?.length || !event.intercepts?.some((id) => scoped?.has(id)))) {
             return claim(event) ? call() : undefined
+        }
+
+        if (handling) {
+            const decision = new Promise<unknown>((resolve) => queueMicrotask(() => {
+                void Promise.all(pendingDecisions(event, [SCOPED_PENDING])).then(() => {
+                    resolve(claim(event) ? call() : undefined)
+                })
+            }))
+            trackPending(event, decision, DEFERRED)
+            return decision as unknown as T
         }
 
         if (!isClaimed(event)) {
@@ -436,7 +468,7 @@ export default class WebDriverInterception {
 
             const decision = this.#handleBeforeRequestSentWithPostData(request)
             if (isContested(request)) {
-                trackPending(request, decision)
+                trackPending(request, decision, this.#contexts?.length ? SCOPED_PENDING : PENDING)
             }
             return decision
         }
@@ -530,36 +562,38 @@ export default class WebDriverInterception {
             }
 
             this.#emit('overwrite', request)
-            try {
-                const responseData = parseOverwrite(
-                    overwrite as RespondWithOptions,
-                    this.#eventForEarlyResponse(request)
-                )
-                if (responseData.body) {
-                    this.#overwrittenResponseBodies.set(requestId, responseData.body)
+            return this.#release(request, true, () => {
+                try {
+                    const responseData = parseOverwrite(
+                        overwrite as RespondWithOptions,
+                        this.#eventForEarlyResponse(request)
+                    )
+                    if (responseData.body) {
+                        this.#overwrittenResponseBodies.set(requestId, responseData.body)
+                    }
+                    this.#requestsRespondedWithoutFetch.add(requestId)
+                    return this.#withBlockedRequestTracking(
+                        requestId,
+                        this.#browser.networkProvideResponse({
+                            request: requestId,
+                            statusCode: 200,
+                            ...responseData
+                        }).catch((err) => {
+                            this.#requestsRespondedWithoutFetch.delete(requestId)
+                            return this.#handleNetworkProvideResponseError(err)
+                        })
+                    )
+                } catch (err) {
+                    this.#requestsRespondedWithoutFetch.delete(requestId)
+                    log.error(`Failed to apply mock.respond() overwrite: ${(err as Error).message}`)
+                    return this.#withBlockedRequestTracking(
+                        requestId,
+                        this.#browser.networkFailRequest({
+                            request: requestId
+                        }).catch(this.#handleNetworkProvideResponseError)
+                    )
                 }
-                this.#requestsRespondedWithoutFetch.add(requestId)
-                return this.#withBlockedRequestTracking(
-                    requestId,
-                    this.#browser.networkProvideResponse({
-                        request: requestId,
-                        statusCode: 200,
-                        ...responseData
-                    }).catch((err) => {
-                        this.#requestsRespondedWithoutFetch.delete(requestId)
-                        return this.#handleNetworkProvideResponseError(err)
-                    })
-                )
-            } catch (err) {
-                this.#requestsRespondedWithoutFetch.delete(requestId)
-                log.error(`Failed to apply mock.respond() overwrite: ${(err as Error).message}`)
-                return this.#withBlockedRequestTracking(
-                    requestId,
-                    this.#browser.networkFailRequest({
-                        request: requestId
-                    }).catch(this.#handleNetworkProvideResponseError)
-                )
-            }
+            })
         }
 
         const hasRequestOverwrites = this.#requestOverwrites.length > 0
@@ -1113,6 +1147,7 @@ export default class WebDriverInterception {
         // This prevents new requests from being blocked while we're cleaning up
         if (this.#mockId) {
             await this.#browser.networkRemoveIntercept({ intercept: this.#mockId })
+            scopedIntercepts.get(this.#browser)?.delete(this.#mockId)
         }
 
         // Now it's safe to mark as restored
@@ -1266,6 +1301,15 @@ export default class WebDriverInterception {
         return this.#browser.sessionId === browser.sessionId &&
             (context === undefined || Boolean(this.#contexts?.includes(context))) &&
             (test === undefined || this.#test === test)
+    }
+
+    /**
+     * Whether this mock intercepts the same contexts: `undefined` for a session-wide mock
+     * @param contexts  the contexts of another mock
+     * @returns         `true` if both mocks have the same scope
+     */
+    isScopedTo(contexts?: string[]) {
+        return (this.#contexts ?? []).join(',') === (contexts ?? []).join(',')
     }
 
     isSameDefinition(url: string | URLPattern | globalThis.URLPattern, filterOptions: MockFilterOptions = {}) {

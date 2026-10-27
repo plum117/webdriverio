@@ -97,7 +97,8 @@ describe('browsing contexts', () => {
         '/api/restored': () => 'real',
         '/api/closed': () => 'real',
         '/api/session': () => 'real',
-        '/api/own': () => 'real'
+        '/api/own': () => 'real',
+        '/api/user': () => 'real'
     }
 
     const server = createServer((request, response) => {
@@ -456,6 +457,38 @@ describe('browsing contexts', () => {
             await a.navigate(`${origin}/fetch?endpoint=session`)
             await expect(a.$('#result')).toHaveText('real')
         })
+
+        for (const tabMockFirst of [false, true]) {
+            it(`lets a tab mock override a session-wide mock of the same url in that tab only (${tabMockFirst ? 'tab mock first' : 'session-wide mock first'})`, async () => {
+                const a = await open('/tab-a')
+                const b = await openTab('/tab-a')
+                const mockSessionWide = async () => {
+                    const all = await browser.mock('**/api/user')
+                    all.respond('default', { headers: { 'Content-Type': 'text/plain' }, fetchResponse: false })
+                }
+                const mockTab = async () => {
+                    const own = await b.mock('**/api/user')
+                    own.respond('special', { headers: { 'Content-Type': 'text/plain' }, fetchResponse: false })
+                }
+                if (tabMockFirst) {
+                    await mockTab()
+                    await mockSessionWide()
+                } else {
+                    await mockSessionWide()
+                    await mockTab()
+                }
+
+                await b.navigate(`${origin}/fetch?endpoint=user`)
+                await expect(b.$('#result')).toHaveText('special')
+                await a.navigate(`${origin}/fetch?endpoint=user`)
+                await expect(a.$('#result')).toHaveText('default')
+
+                await b.mockRestoreAll()
+                await b.navigate(`${origin}/fetch?endpoint=user`)
+                await expect(b.$('#result')).toHaveText('default')
+                await browser.mockRestoreAll()
+            })
+        }
 
         it('shares cookies between tabs of the same origin', async () => {
             const a = await open('/tab-a')

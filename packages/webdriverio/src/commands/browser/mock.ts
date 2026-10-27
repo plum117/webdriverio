@@ -163,8 +163,13 @@ export async function mock(
         SESSION_MOCKS[context] = new Set()
     }
     const normalizedFilterOptions = filterOptions || {}
+    const contexts = isContextScoped(this) ? [context] : undefined
+    /**
+     * A mock of the same URL and scope replaces the old one. A tab or parallel test mock and
+     * a session-wide mock of the same URL both stay: the narrower one answers in its context.
+     */
     for (const existingMock of Array.from(SESSION_MOCKS[context])) {
-        if (!existingMock.isSameDefinition(url, normalizedFilterOptions)) {
+        if (!existingMock.isSameDefinition(url, normalizedFilterOptions) || !existingMock.isScopedTo(contexts)) {
             continue
         }
 
@@ -178,7 +183,7 @@ export async function mock(
      * session-wide intercept would catch other tests' traffic.
      */
     const networkInterception = await WebDriverInterception.initiate(url, normalizedFilterOptions, browser, {
-        contexts: isContextScoped(this) ? [context] : undefined,
+        contexts,
         sessionKey: context,
         test: getParallelContextStore().getStore()
     })

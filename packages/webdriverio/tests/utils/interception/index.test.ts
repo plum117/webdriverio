@@ -2243,6 +2243,18 @@ describe('WebDriverInterception', () => {
             expect(browser.networkProvideResponse).toHaveBeenCalledTimes(1)
         })
 
+        it('is answered once when both mocks respond before the request is sent', async () => {
+            const browser = getBrowserMockWithUniqueIntercepts()
+            const [first, second] = await initiateOverlappingMocks(browser)
+            first.respond({ from: 'first' }, { fetchResponse: false })
+            second.respond({ from: 'second' }, { fetchResponse: false })
+
+            browser.emit('network.beforeRequestSent', blockedBy(['mock-id-1', 'mock-id-2']))
+
+            expect(browser.networkProvideResponse).toHaveBeenCalledTimes(1)
+            expect(browser.networkContinueRequest).toHaveBeenCalledTimes(0)
+        })
+
         it('is failed once when both mocks abort', async () => {
             const browser = getBrowserMockWithUniqueIntercepts()
             const [first, second] = await initiateOverlappingMocks(browser)
@@ -2423,6 +2435,77 @@ describe('WebDriverInterception', () => {
 
             expect(browser.networkContinueRequest).toHaveBeenCalledTimes(1)
             expect(browser.networkProvideResponse).toHaveBeenCalledTimes(1)
+        })
+
+        describe('by a mock of a tab or a parallel test and a session-wide mock', () => {
+            const respondedWith = (browser: WebdriverIO.Browser) => vi.mocked(browser.networkProvideResponse).mock.calls.map(
+                ([{ body }]) => JSON.parse((body as { value: string }).value).from
+            )
+            // a new object each time: the release mark is written on the event
+            const responseStarted = () => ({ ...blockedBy(['mock-id-1', 'mock-id-2']), context: 'ctx-1', response: { headers: [], status: 200 } })
+
+            it('lets the scoped mock answer when the session-wide mock was made first', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                const scoped = await WebDriverInterception.initiate(TARGET_URL, {}, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                sessionWide.respond({ from: 'session-wide' })
+                scoped.respond({ from: 'scoped' })
+
+                browser.emit('network.responseStarted', responseStarted())
+                await waitForAsyncHandlers()
+
+                expect(respondedWith(browser)).toEqual(['scoped'])
+            })
+
+            it('lets the scoped mock answer when it was made first', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                const scoped = await WebDriverInterception.initiate(TARGET_URL, {}, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                scoped.respond({ from: 'scoped' })
+                sessionWide.respond({ from: 'session-wide' })
+
+                browser.emit('network.responseStarted', responseStarted())
+                await waitForAsyncHandlers()
+
+                expect(respondedWith(browser)).toEqual(['scoped'])
+            })
+
+            it('lets the session-wide mock answer when the scoped mock declines', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                // declines a GET
+                const scoped = await WebDriverInterception.initiate(TARGET_URL, { method: 'post' }, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                sessionWide.respond({ from: 'session-wide' })
+                scoped.respond({ from: 'scoped' })
+
+                browser.emit('network.responseStarted', responseStarted())
+                await waitForAsyncHandlers()
+
+                expect(respondedWith(browser)).toEqual(['session-wide'])
+            })
+
+            it('waits for the body read of a scoped postData mock before the session-wide mock answers', async () => {
+                for (const [body, expected] of [['request-body', 'scoped'], ['other-body', 'session-wide']]) {
+                    const { lookup, resolveBody } = deferredRequestBody()
+                    const browser = getBrowserMockWithUniqueIntercepts()
+                    vi.mocked(browser.networkGetData).mockReturnValue(lookup)
+                    const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                    const scoped = await WebDriverInterception.initiate(TARGET_URL, { postData: 'request-body' }, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                    sessionWide.respond({ from: 'session-wide' }, { fetchResponse: false })
+                    scoped.respond({ from: 'scoped' }, { fetchResponse: false })
+
+                    browser.emit('network.beforeRequestSent', { ...blockedBy(['mock-id-1', 'mock-id-2']), context: 'ctx-1' })
+                    await flushMicrotasks()
+                    expect(browser.networkProvideResponse).not.toHaveBeenCalled()
+
+                    resolveBody(body)
+                    await lookup
+                    await waitForAsyncHandlers()
+
+                    expect(respondedWith(browser)).toEqual([expected])
+                    expect(browser.networkContinueRequest).not.toHaveBeenCalled()
+                }
+            })
         })
     })
 

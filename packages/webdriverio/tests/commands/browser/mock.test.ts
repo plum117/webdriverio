@@ -45,11 +45,13 @@ describe('mock', () => {
 
         const firstMock = {
             restore: vi.fn().mockResolvedValue(undefined),
-            isSameDefinition: vi.fn().mockReturnValue(true)
+            isSameDefinition: vi.fn().mockReturnValue(true),
+            isScopedTo: vi.fn().mockReturnValue(true)
         }
         const secondMock = {
             restore: vi.fn().mockResolvedValue(undefined),
-            isSameDefinition: vi.fn().mockReturnValue(true)
+            isSameDefinition: vi.fn().mockReturnValue(true),
+            isScopedTo: vi.fn().mockReturnValue(true)
         }
         const initiateSpy = vi.spyOn(WebDriverInterception, 'initiate')
             .mockResolvedValueOnce(firstMock as any)
@@ -68,6 +70,36 @@ describe('mock', () => {
         initiateSpy.mockRestore()
     })
 
+    it('should keep an existing mock with the same definition but another scope', async () => {
+        browser = await remote({
+            baseUrl: 'http://foobar.com',
+            capabilities: {
+                browserName: 'bidi'
+            }
+        })
+
+        const sessionWideMock = {
+            restore: vi.fn().mockResolvedValue(undefined),
+            isSameDefinition: vi.fn().mockReturnValue(true),
+            isScopedTo: vi.fn().mockReturnValue(false)
+        }
+        const initiateSpy = vi.spyOn(WebDriverInterception, 'initiate')
+            .mockResolvedValueOnce(sessionWideMock as any)
+            .mockResolvedValueOnce({ restore: vi.fn() } as any)
+
+        await browser.mock('**/foo')
+        await browser.mock('**/foo')
+
+        expect(sessionWideMock.isScopedTo).toHaveBeenCalledWith(undefined)
+        expect(sessionWideMock.restore).not.toHaveBeenCalled()
+        const totalMocks = Object.values(SESSION_MOCKS).reduce((acc, mocks) => acc + mocks.size, 0)
+        expect(totalMocks).toBe(2)
+        initiateSpy.mockRestore()
+        for (const key of Object.keys(SESSION_MOCKS)) {
+            delete SESSION_MOCKS[key]
+        }
+    })
+
     it('scopes the intercept to the store context in a parallel test', async () => {
         browser = await remote({
             baseUrl: 'http://foobar.com',
@@ -78,7 +110,7 @@ describe('mock', () => {
         const noopStore = getParallelContextStore()
         const store = new AsyncLocalStorage<string>()
         setParallelContextStore(store)
-        const initiateSpy = vi.spyOn(WebDriverInterception, 'initiate').mockResolvedValue({ restore: vi.fn(), isSameDefinition: vi.fn().mockReturnValue(false) } as any)
+        const initiateSpy = vi.spyOn(WebDriverInterception, 'initiate').mockResolvedValue({ restore: vi.fn(), isSameDefinition: vi.fn().mockReturnValue(false), isScopedTo: vi.fn().mockReturnValue(true) } as any)
         try {
             await store.run('ctx-1', () => browser.mock('**/scoped'))
             expect(initiateSpy).toHaveBeenLastCalledWith('**/scoped', {}, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1', test: 'ctx-1' })
