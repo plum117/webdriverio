@@ -517,6 +517,23 @@ describe('browsing contexts', () => {
             }
         })
 
+        it('lets a session-wide mock answer when a tab mock of the same url declines the response', async () => {
+            await open('/tab-a')
+            const b = await openTab('/tab-a')
+            try {
+                const all = await browser.mock('**/api/user')
+                all.respond('default', { headers: { 'Content-Type': 'text/plain' }, fetchResponse: false })
+                // needs the response, so it continues the request; the server sends 200
+                const own = await b.mock('**/api/user', { statusCode: 201 })
+                own.respond('special', { headers: { 'Content-Type': 'text/plain' } })
+
+                await b.navigate(`${origin}/fetch?endpoint=user`)
+                await expect(b.$('#result')).toHaveText('default')
+            } finally {
+                await browser.mockRestoreAll()
+            }
+        })
+
         it('shares cookies between tabs of the same origin', async () => {
             const a = await open('/tab-a')
             const b = await openTab('/tab-b')

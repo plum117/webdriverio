@@ -62,6 +62,14 @@ type DecisionKind = typeof PENDING | typeof SCOPED_PENDING | typeof DEFERRED
  */
 const scopedIntercepts = new WeakMap<WebdriverIO.Browser, Set<string>>()
 
+/**
+ * Requests that a mock answered in `beforeRequestSent`, per browser. Chrome still
+ * reports their `responseStarted` as blocked by the other intercepts, and there is
+ * no paused request left to release, so every mock skips it. A mock that only
+ * continued the request does not add it: then the response is real.
+ */
+const answeredEarly = new WeakMap<WebdriverIO.Browser, Set<string>>()
+
 type InterceptedEvent = { intercepts?: string[] }
 type MarkedEvent = InterceptedEvent & {
     [RELEASED]?: true
@@ -213,6 +221,12 @@ export default class WebDriverInterception {
     #restorePromise?: Promise<this>
     #requestOverwrites: Overwrite[] = []
     #respondOverwrites: Overwrite[] = []
+    /**
+     * Counts the resets and replacements of each queue, so an entry taken before
+     * one of them is not put back
+     */
+    #requestEpoch = 0
+    #respondEpoch = 0
     #calls: Response[] = []
     #overwrittenResponseBodies = new Map<string, remote.NetworkBytesValue>()
     #requestPostData = new Map<string, string>()
@@ -394,9 +408,14 @@ export default class WebDriverInterception {
         }
     }
 
-    #putBack(queue: Overwrite[], entry: Overwrite) {
-        if (entry.once && !this.#restored) {
-            queue.unshift(entry)
+    #putBack(kind: 'request' | 'respond', entry: Overwrite, epoch: number) {
+        if (!entry.once || this.#restored) {
+            return
+        }
+        if (kind === 'request' && epoch === this.#requestEpoch) {
+            this.#requestOverwrites.unshift(entry)
+        } else if (kind === 'respond' && epoch === this.#respondEpoch) {
+            this.#respondOverwrites.unshift(entry)
         }
     }
 
@@ -555,6 +574,7 @@ export default class WebDriverInterception {
          */
         const abortEntry = this.#requestOverwrites[0]
         if (abortEntry?.abort) {
+            const epoch = this.#requestEpoch
             this.#take(this.#requestOverwrites, abortEntry)
             return this.#release(request, true, () => {
                 this.#emit('fail', requestId)
@@ -562,7 +582,7 @@ export default class WebDriverInterception {
                     requestId,
                     this.#browser.networkFailRequest({ request: requestId }).catch(this.#handleNetworkProvideResponseError)
                 )
-            }, () => this.#putBack(this.#requestOverwrites, abortEntry))
+            }, () => this.#putBack('request', abortEntry, epoch))
         }
 
         const responseOverwrite = this.#respondOverwrites[0]
@@ -579,9 +599,8 @@ export default class WebDriverInterception {
             )
         ) {
             const { overwrite } = responseOverwrite
+            const epoch = this.#respondEpoch
             this.#take(this.#respondOverwrites, responseOverwrite)
-            // the mock that loses the release skips the responseStarted of this request too
-            this.#requestsRespondedWithoutFetch.add(requestId)
             return this.#release(request, true, () => {
                 this.#emit('overwrite', request)
                 try {
@@ -592,6 +611,9 @@ export default class WebDriverInterception {
                     if (responseData.body) {
                         this.#overwrittenResponseBodies.set(requestId, responseData.body)
                     }
+                    this.#requestsRespondedWithoutFetch.add(requestId)
+                    const early = answeredEarly.get(this.#browser) ?? new Set<string>()
+                    answeredEarly.set(this.#browser, early.add(requestId))
                     return this.#withBlockedRequestTracking(
                         requestId,
                         this.#browser.networkProvideResponse({
@@ -600,6 +622,7 @@ export default class WebDriverInterception {
                             ...responseData
                         }).catch((err) => {
                             this.#requestsRespondedWithoutFetch.delete(requestId)
+                            answeredEarly.get(this.#browser)?.delete(requestId)
                             return this.#handleNetworkProvideResponseError(err)
                         })
                     )
@@ -613,12 +636,13 @@ export default class WebDriverInterception {
                         }).catch(this.#handleNetworkProvideResponseError)
                     )
                 }
-            }, () => this.#putBack(this.#respondOverwrites, responseOverwrite))
+            }, () => this.#putBack('respond', responseOverwrite, epoch))
         }
 
         const requestEntry = this.#requestOverwrites[0]
         if (requestEntry) {
             const { overwrite } = requestEntry
+            const epoch = this.#requestEpoch
             this.#take(this.#requestOverwrites, requestEntry)
             return this.#release(request, true, () => {
                 this.#emit('overwrite', request)
@@ -629,7 +653,7 @@ export default class WebDriverInterception {
                         ...(overwrite ? parseOverwrite(overwrite, request) : {})
                     }).catch(this.#handleNetworkProvideResponseError)
                 )
-            }, () => this.#putBack(this.#requestOverwrites, requestEntry))
+            }, () => this.#putBack('request', requestEntry, epoch))
         }
 
         this.#emit('continue', requestId)
@@ -690,7 +714,10 @@ export default class WebDriverInterception {
          * emit `responseStarted`, but there is no longer a paused request to
          * release at this phase.
          */
-        if (this.#requestsRespondedWithoutFetch.delete(request.request.request)) {
+        const early = answeredEarly.get(this.#browser)
+        if (this.#requestsRespondedWithoutFetch.delete(request.request.request) || early?.has(request.request.request)) {
+            // all listeners of this event read it first
+            queueMicrotask(() => early?.delete(request.request.request))
             return
         }
 
@@ -733,6 +760,7 @@ export default class WebDriverInterception {
 
         const responseEntry = this.#respondOverwrites[0]
         const { overwrite } = responseEntry
+        const epoch = this.#respondEpoch
         this.#take(this.#respondOverwrites, responseEntry)
 
         /**
@@ -767,7 +795,7 @@ export default class WebDriverInterception {
                         }).catch(this.#handleNetworkProvideResponseError)
                     )
                 }
-            }, () => this.#putBack(this.#respondOverwrites, responseEntry))
+            }, () => this.#putBack('respond', responseEntry, epoch))
         }
 
         /**
@@ -1110,6 +1138,8 @@ export default class WebDriverInterception {
         this.clear()
         this.#respondOverwrites = []
         this.#requestOverwrites = []
+        this.#respondEpoch++
+        this.#requestEpoch++
         return this
     }
 
@@ -1187,6 +1217,9 @@ export default class WebDriverInterception {
     request(overwrite: RequestWithOptions, once?: boolean) {
         this.#ensureNotRestored()
         this.#requestOverwrites = this.#setOverwrite(this.#requestOverwrites, { overwrite, once })
+        if (!once) {
+            this.#requestEpoch++
+        }
         return this
     }
 
@@ -1212,6 +1245,9 @@ export default class WebDriverInterception {
             : toNetworkBody(payload)
         const overwrite: RespondWithOptions = { body, ...params }
         this.#respondOverwrites = this.#setOverwrite(this.#respondOverwrites, { overwrite, once })
+        if (!once) {
+            this.#respondEpoch++
+        }
         return this
     }
 
@@ -1230,6 +1266,9 @@ export default class WebDriverInterception {
     abort(once?: boolean) {
         this.#ensureNotRestored()
         this.#requestOverwrites = this.#setOverwrite(this.#requestOverwrites, { abort: true, once })
+        if (!once) {
+            this.#requestEpoch++
+        }
         return this
     }
 

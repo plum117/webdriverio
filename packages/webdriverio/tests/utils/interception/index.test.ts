@@ -2525,6 +2525,45 @@ describe('WebDriverInterception', () => {
                 expect(respondedWith(browser)).toEqual(['scoped', 'session-wide'])
             })
 
+            it('does not bring back a once entry that reset() removed while the mock waited', async () => {
+                const { lookup, resolveBody } = deferredRequestBody()
+                const browser = getBrowserMockWithUniqueIntercepts()
+                vi.mocked(browser.networkGetData).mockReturnValue(lookup)
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                const scoped = await WebDriverInterception.initiate(TARGET_URL, { postData: 'request-body' }, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                sessionWide.respondOnce({ from: 'session-wide' }, { fetchResponse: false })
+                scoped.respond({ from: 'scoped' }, { fetchResponse: false })
+
+                browser.emit('network.beforeRequestSent', blockedIn(['mock-id-1', 'mock-id-2'], 'ctx-1', 123))
+                await flushMicrotasks()
+                sessionWide.reset()
+                resolveBody('request-body')
+                await lookup
+                await waitForAsyncHandlers()
+                browser.emit('network.beforeRequestSent', blockedIn(['mock-id-1'], 'ctx-2', 124))
+                await waitForAsyncHandlers()
+
+                expect(respondedWith(browser)).toEqual(['scoped'])
+                expect(browser.networkContinueRequest).toHaveBeenCalledWith({ request: 124 })
+            })
+
+            it('lets the session-wide mock answer the response when the scoped mock only continued the request', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                // needs the response, so it continues the request and declines a 200
+                const scoped = await WebDriverInterception.initiate(TARGET_URL, { statusCode: 201 }, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                sessionWide.respond({ from: 'session-wide' }, { fetchResponse: false })
+                scoped.respond({ from: 'scoped' })
+
+                browser.emit('network.beforeRequestSent', blockedIn(['mock-id-1', 'mock-id-2'], 'ctx-1'))
+                await waitForAsyncHandlers()
+                browser.emit('network.responseStarted', { ...blockedIn(['mock-id-1', 'mock-id-2'], 'ctx-1'), response: { headers: [], status: 200 } })
+                await waitForAsyncHandlers()
+
+                expect(browser.networkContinueRequest).toHaveBeenCalledWith({ request: 123 })
+                expect(respondedWith(browser)).toEqual(['session-wide'])
+            })
+
             it('does not leave an unhandled rejection when an overwrite of the deferred session-wide mock throws', async () => {
                 const browser = getBrowserMockWithUniqueIntercepts()
                 const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
@@ -2551,6 +2590,7 @@ describe('WebDriverInterception', () => {
                 second.respond({ from: 'second' }, { fetchResponse: false })
 
                 browser.emit('network.beforeRequestSent', blockedBy(['mock-id-1', 'mock-id-2']))
+                // Chrome still reports it as blocked by the intercept of the mock that lost
                 browser.emit('network.responseStarted', { ...blockedBy(['mock-id-1', 'mock-id-2']), response: { headers: [], status: 200 } })
                 await waitForAsyncHandlers()
 
