@@ -2564,6 +2564,25 @@ describe('WebDriverInterception', () => {
                 expect(respondedWith(browser)).toEqual(['session-wide'])
             })
 
+            it('lets the early answer of the session-wide mock win in Firefox when the scoped mock only lets the request through', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                Object.assign(browser, { isFirefox: true })
+                const logWarnSpy = vi.spyOn(logger('WebDriverInterception'), 'warn')
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                // needs the response, which Firefox can not replace after the request was sent
+                const scoped = await WebDriverInterception.initiate(TARGET_URL, { statusCode: 201 }, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                sessionWide.respond({ from: 'session-wide' }, { fetchResponse: false })
+                scoped.respond({ from: 'scoped' })
+
+                browser.emit('network.beforeRequestSent', blockedIn(['mock-id-1', 'mock-id-2'], 'ctx-1'))
+                await waitForAsyncHandlers()
+
+                expect(browser.networkContinueRequest).not.toHaveBeenCalled()
+                expect(respondedWith(browser)).toEqual(['session-wide'])
+                expect(logWarnSpy.mock.calls.flat().join(' ')).toContain('filters on the response')
+                logWarnSpy.mockRestore()
+            })
+
             it('does not leave an unhandled rejection when an overwrite of the deferred session-wide mock throws', async () => {
                 const browser = getBrowserMockWithUniqueIntercepts()
                 const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)

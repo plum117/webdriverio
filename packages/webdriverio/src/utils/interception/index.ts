@@ -202,6 +202,7 @@ export default class WebDriverInterception {
      */
     #onContextDestroyed?: (params: { context: string }) => void
     #warnedAboutEarlyAnswer = false
+    #warnedAboutLetThrough = false
     #filterOptions: MockFilterOptions
     #browser: WebdriverIO.Browser
     #contexts?: string[]
@@ -657,12 +658,32 @@ export default class WebDriverInterception {
         }
 
         this.#emit('continue', requestId)
-        return this.#release(request, true, () => this.#withBlockedRequestTracking(
+        return this.#release(request, !this.#yieldsLetThrough(request), () => this.#withBlockedRequestTracking(
             requestId,
             this.#browser.networkContinueRequest({
                 request: requestId
             }).catch(this.#handleNetworkProvideResponseError)
         ))
+    }
+
+    /**
+     * Firefox can not replace a response body once the response started, so a mock of a
+     * tab or a parallel test that only lets the request through to see its response
+     * could not answer it anyway. It does not take the request from another mock that
+     * answers early, e.g. a session-wide default.
+     */
+    #yieldsLetThrough(request: InterceptedEvent) {
+        if (!this.#browser.isFirefox || !this.#contexts?.length || !isContested(request)) {
+            return false
+        }
+        if (this.#respondOverwrites.length > 0 && !this.#warnedAboutLetThrough) {
+            this.#warnedAboutLetThrough = true
+            log.warn(
+                'In Firefox, mock.respond() of a mock that filters on the response can not replace the body. ' +
+                'Another mock of the same request answers it before it is sent.'
+            )
+        }
+        return true
     }
 
     #handleResponseStarted(request: Response) {

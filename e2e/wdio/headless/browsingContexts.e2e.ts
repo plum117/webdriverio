@@ -517,11 +517,7 @@ describe('browsing contexts', () => {
             }
         })
 
-        it('lets a session-wide mock answer when a tab mock of the same url declines the response', async function () {
-            if (browser.isFirefox) {
-                // Firefox takes a response body only in beforeRequestSent, and the tab mock needs the real response
-                return this.skip()
-            }
+        it('lets a session-wide mock answer when a tab mock of the same url declines the response', async () => {
             await open('/tab-a')
             const b = await openTab('/tab-a')
             try {
