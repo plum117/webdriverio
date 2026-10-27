@@ -87,16 +87,19 @@ describe('mock', () => {
             .mockResolvedValueOnce(sessionWideMock as any)
             .mockResolvedValueOnce({ restore: vi.fn() } as any)
 
-        await browser.mock('**/foo')
-        await browser.mock('**/foo')
+        try {
+            await browser.mock('**/foo')
+            await browser.mock('**/foo')
 
-        expect(sessionWideMock.isScopedTo).toHaveBeenCalledWith(undefined)
-        expect(sessionWideMock.restore).not.toHaveBeenCalled()
-        const totalMocks = Object.values(SESSION_MOCKS).reduce((acc, mocks) => acc + mocks.size, 0)
-        expect(totalMocks).toBe(2)
-        initiateSpy.mockRestore()
-        for (const key of Object.keys(SESSION_MOCKS)) {
-            delete SESSION_MOCKS[key]
+            expect(sessionWideMock.isScopedTo).toHaveBeenCalledWith(undefined)
+            expect(sessionWideMock.restore).not.toHaveBeenCalled()
+            const totalMocks = Object.values(SESSION_MOCKS).reduce((acc, mocks) => acc + mocks.size, 0)
+            expect(totalMocks).toBe(2)
+        } finally {
+            initiateSpy.mockRestore()
+            for (const key of Object.keys(SESSION_MOCKS)) {
+                delete SESSION_MOCKS[key]
+            }
         }
     })
 
