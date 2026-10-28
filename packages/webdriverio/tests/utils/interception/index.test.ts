@@ -2583,6 +2583,95 @@ describe('WebDriverInterception', () => {
                 logWarnSpy.mockRestore()
             })
 
+            it('lets a session-wide early answer win over a scoped spy', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                // no overwrite: it only records the requests
+                await WebDriverInterception.initiate(TARGET_URL, {}, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                sessionWide.respond({ from: 'session-wide' }, { fetchResponse: false })
+
+                browser.emit('network.beforeRequestSent', blockedIn(['mock-id-1', 'mock-id-2'], 'ctx-1'))
+                await waitForAsyncHandlers()
+
+                expect(respondedWith(browser)).toEqual(['session-wide'])
+                expect(browser.networkContinueRequest).not.toHaveBeenCalled()
+            })
+
+            it('lets a session-wide response overwrite win over a scoped spy', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                await WebDriverInterception.initiate(TARGET_URL, {}, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                sessionWide.respond({ from: 'session-wide' })
+
+                browser.emit('network.responseStarted', { ...blockedIn(['mock-id-1', 'mock-id-2'], 'ctx-1'), response: { headers: [], status: 200 } })
+                await waitForAsyncHandlers()
+
+                expect(respondedWith(browser)).toEqual(['session-wide'])
+            })
+
+            it('fails the request when a request() overwrite throws, instead of leaving it paused', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                // declines a GET, so the session-wide mock takes the request
+                await WebDriverInterception.initiate(TARGET_URL, { method: 'post' }, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                sessionWide.request({ body: () => { throw new Error('boom from overwrite') } } as any)
+
+                browser.emit('network.beforeRequestSent', blockedIn(['mock-id-1', 'mock-id-2'], 'ctx-1'))
+                await waitForAsyncHandlers()
+
+                expect(browser.networkFailRequest).toHaveBeenCalledWith({ request: 123 })
+                expect(browser.networkContinueRequest).not.toHaveBeenCalled()
+            })
+
+            it('skips only the responseStarted of the answered hop, not a later redirect hop', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                const [first, second] = await initiateOverlappingMocks(browser)
+                first.respond({ from: 'first' }, { fetchResponse: false })
+                second.respond({ from: 'second' }, { fetchResponse: false })
+
+                browser.emit('network.beforeRequestSent', blockedBy(['mock-id-1', 'mock-id-2']))
+                await waitForAsyncHandlers()
+                first.reset()
+                second.reset()
+                // next hop of the same request id, with a real response to let through
+                browser.emit('network.responseStarted', { ...blockedBy(['mock-id-1', 'mock-id-2']), redirectCount: 1, response: { headers: [], status: 200 } })
+                await waitForAsyncHandlers()
+
+                expect(respondedWith(browser)).toEqual(['first', 'continued'])
+            })
+
+            it('does not warn in Firefox when the other mock of the request only declines', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                Object.assign(browser, { isFirefox: true })
+                const logWarnSpy = vi.spyOn(logger('WebDriverInterception'), 'warn')
+                await WebDriverInterception.initiate(TARGET_URL, { method: 'post' }, browser)
+                const scoped = await WebDriverInterception.initiate(TARGET_URL, { statusCode: 201 }, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                scoped.respond({ from: 'scoped' })
+
+                browser.emit('network.beforeRequestSent', blockedIn(['mock-id-1', 'mock-id-2'], 'ctx-1'))
+                await waitForAsyncHandlers()
+                const warned = logWarnSpy.mock.calls.flat().join(' ')
+                logWarnSpy.mockRestore()
+
+                expect(browser.networkContinueRequest).toHaveBeenCalledTimes(1)
+                expect(warned).not.toContain('filters on the response')
+            })
+
+            it('emits continue only from the mock that continued the request', async () => {
+                const browser = getBrowserMockWithUniqueIntercepts()
+                const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)
+                const scoped = await WebDriverInterception.initiate(TARGET_URL, {}, browser, { contexts: ['ctx-1'], sessionKey: 'ctx-1' })
+                scoped.respond({ from: 'scoped' }, { fetchResponse: false })
+                const continued: string[] = []
+                sessionWide.on('continue', () => continued.push('session-wide'))
+
+                browser.emit('network.beforeRequestSent', blockedIn(['mock-id-1', 'mock-id-2'], 'ctx-1'))
+                await waitForAsyncHandlers()
+
+                expect(respondedWith(browser)).toEqual(['scoped'])
+                expect(continued).toEqual([])
+            })
+
             it('does not leave an unhandled rejection when an overwrite of the deferred session-wide mock throws', async () => {
                 const browser = getBrowserMockWithUniqueIntercepts()
                 const sessionWide = await WebDriverInterception.initiate(TARGET_URL, {}, browser)

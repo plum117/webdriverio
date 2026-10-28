@@ -534,6 +534,22 @@ describe('browsing contexts', () => {
             }
         })
 
+        it('lets a session-wide mock answer in a tab that only has a spy of the same url', async () => {
+            await open('/tab-a')
+            const b = await openTab('/tab-a')
+            try {
+                const all = await browser.mock('**/api/user')
+                all.respond('default', { headers: { 'Content-Type': 'text/plain' }, fetchResponse: false })
+                const spy = await b.mock('**/api/user')
+
+                await b.navigate(`${origin}/fetch?endpoint=user`)
+                await expect(b.$('#result')).toHaveText('default')
+                expect(spy.calls.length).toBeGreaterThan(0)
+            } finally {
+                await browser.mockRestoreAll()
+            }
+        })
+
         it('shares cookies between tabs of the same origin', async () => {
             const a = await open('/tab-a')
             const b = await openTab('/tab-b')

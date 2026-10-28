@@ -51,6 +51,8 @@ const subscribedSessions = new WeakMap<WebdriverIO.Browser, string | undefined>(
  * of scoped mocks: a scoped mock claims at once, so it never waits for it.
  */
 const RELEASED = Symbol('wdio.interception.released')
+// released by a mock that only let it through because it did not match
+const PASSED_THROUGH = Symbol('wdio.interception.passed-through')
 const PENDING = Symbol('wdio.interception.pending')
 const SCOPED_PENDING = Symbol('wdio.interception.scoped-pending')
 const DEFERRED = Symbol('wdio.interception.deferred')
@@ -68,11 +70,12 @@ const scopedIntercepts = new WeakMap<WebdriverIO.Browser, Set<string>>()
  * no paused request left to release, so every mock skips it. A mock that only
  * continued the request does not add it: then the response is real.
  */
-const answeredEarly = new WeakMap<WebdriverIO.Browser, Set<string>>()
+const answeredEarly = new WeakMap<WebdriverIO.Browser, Map<string, number>>()
 
 type InterceptedEvent = { intercepts?: string[] }
 type MarkedEvent = InterceptedEvent & {
     [RELEASED]?: true
+    [PASSED_THROUGH]?: true
     [PENDING]?: Promise<void>[]
     [SCOPED_PENDING]?: Promise<void>[]
     [DEFERRED]?: Promise<void>[]
@@ -235,7 +238,6 @@ export default class WebDriverInterception {
     #hasOneResponseCollected = false
     #hasOneBodyReadStarted = false
     #blockedRequests = new Set<string>()
-    #requestsRespondedWithoutFetch = new Set<string>()
 
     constructor(
         pattern: URLPattern,
@@ -449,11 +451,16 @@ export default class WebDriverInterception {
             return decision as unknown as T
         }
 
-        if (!isClaimed(event)) {
+        if (isClaimed(event)) {
+            onLose?.()
+        } else {
             queueMicrotask(() => {
                 const release = () => {
                     if (claim(event)) {
+                        (event as MarkedEvent)[PASSED_THROUGH] = true
                         call()
+                    } else {
+                        onLose?.()
                     }
                 }
                 const pending = pendingDecisions(event)
@@ -612,9 +619,9 @@ export default class WebDriverInterception {
                     if (responseData.body) {
                         this.#overwrittenResponseBodies.set(requestId, responseData.body)
                     }
-                    this.#requestsRespondedWithoutFetch.add(requestId)
-                    const early = answeredEarly.get(this.#browser) ?? new Set<string>()
-                    answeredEarly.set(this.#browser, early.add(requestId))
+                    // the hop, so a later redirect hop of the same request id is not skipped
+                    const early = answeredEarly.get(this.#browser) ?? new Map<string, number>()
+                    answeredEarly.set(this.#browser, early.set(requestId, request.redirectCount ?? 0))
                     return this.#withBlockedRequestTracking(
                         requestId,
                         this.#browser.networkProvideResponse({
@@ -622,13 +629,11 @@ export default class WebDriverInterception {
                             statusCode: 200,
                             ...responseData
                         }).catch((err) => {
-                            this.#requestsRespondedWithoutFetch.delete(requestId)
                             answeredEarly.get(this.#browser)?.delete(requestId)
                             return this.#handleNetworkProvideResponseError(err)
                         })
                     )
                 } catch (err) {
-                    this.#requestsRespondedWithoutFetch.delete(requestId)
                     log.error(`Failed to apply mock.respond() overwrite: ${(err as Error).message}`)
                     return this.#withBlockedRequestTracking(
                         requestId,
@@ -647,43 +652,60 @@ export default class WebDriverInterception {
             this.#take(this.#requestOverwrites, requestEntry)
             return this.#release(request, true, () => {
                 this.#emit('overwrite', request)
-                return this.#withBlockedRequestTracking(
-                    requestId,
-                    this.#browser.networkContinueRequest({
-                        request: requestId,
-                        ...(overwrite ? parseOverwrite(overwrite, request) : {})
-                    }).catch(this.#handleNetworkProvideResponseError)
-                )
+                try {
+                    return this.#withBlockedRequestTracking(
+                        requestId,
+                        this.#browser.networkContinueRequest({
+                            request: requestId,
+                            ...(overwrite ? parseOverwrite(overwrite, request) : {})
+                        }).catch(this.#handleNetworkProvideResponseError)
+                    )
+                } catch (err) {
+                    // the event dispatch swallows the error, so the request would stay paused
+                    log.error(`Failed to apply mock.request() overwrite: ${(err as Error).message}`)
+                    return this.#withBlockedRequestTracking(
+                        requestId,
+                        this.#browser.networkFailRequest({ request: requestId }).catch(this.#handleNetworkProvideResponseError)
+                    )
+                }
             }, () => this.#putBack('request', requestEntry, epoch))
         }
 
-        this.#emit('continue', requestId)
-        return this.#release(request, !this.#yieldsLetThrough(request), () => this.#withBlockedRequestTracking(
-            requestId,
-            this.#browser.networkContinueRequest({
-                request: requestId
-            }).catch(this.#handleNetworkProvideResponseError)
-        ))
+        const yields = this.#yieldsLetThrough(request)
+        return this.#release(request, !yields, () => {
+            this.#emit('continue', requestId)
+            return this.#withBlockedRequestTracking(
+                requestId,
+                this.#browser.networkContinueRequest({
+                    request: requestId
+                }).catch(this.#handleNetworkProvideResponseError)
+            )
+        }, yields ? () => this.#warnLetThrough(request) : undefined)
     }
 
     /**
-     * Firefox can not replace a response body once the response started, so a mock of a
-     * tab or a parallel test that only lets the request through to see its response
-     * could not answer it anyway. It does not take the request from another mock that
-     * answers early, e.g. a session-wide default.
+     * A mock of a tab or a parallel test that only lets a request through does not take
+     * it from another mock that answers it, e.g. a session-wide default: when it has
+     * nothing to answer later (a spy), and in Firefox, which can not replace a response
+     * body once the response started.
      */
     #yieldsLetThrough(request: InterceptedEvent) {
-        if (!this.#browser.isFirefox || !this.#contexts?.length || !isContested(request)) {
-            return false
+        return Boolean(this.#contexts?.length) && isContested(request) &&
+            (this.#browser.isFirefox || this.#respondOverwrites.length === 0)
+    }
+
+    #warnLetThrough(event: InterceptedEvent) {
+        if (
+            !this.#browser.isFirefox || this.#respondOverwrites.length === 0 || this.#warnedAboutLetThrough ||
+            (event as MarkedEvent)[PASSED_THROUGH]
+        ) {
+            return
         }
-        if (this.#respondOverwrites.length > 0 && !this.#warnedAboutLetThrough) {
-            this.#warnedAboutLetThrough = true
-            log.warn(
-                'In Firefox, mock.respond() of a mock that filters on the response can not replace the body. ' +
-                'Another mock of the same request answers it before it is sent.'
-            )
-        }
-        return true
+        this.#warnedAboutLetThrough = true
+        log.warn(
+            'In Firefox, mock.respond() of a mock that filters on the response can not replace the body. ' +
+            'Another mock of the same request answered it before it was sent.'
+        )
     }
 
     #handleResponseStarted(request: Response) {
@@ -736,9 +758,10 @@ export default class WebDriverInterception {
          * release at this phase.
          */
         const early = answeredEarly.get(this.#browser)
-        if (this.#requestsRespondedWithoutFetch.delete(request.request.request) || early?.has(request.request.request)) {
+        const answeredId = request.request.request
+        if (early?.get(answeredId) === (request.redirectCount ?? 0)) {
             // all listeners of this event read it first
-            queueMicrotask(() => early?.delete(request.request.request))
+            queueMicrotask(() => early.delete(answeredId))
             return
         }
 
@@ -755,10 +778,12 @@ export default class WebDriverInterception {
          * continue mock if not matching filter
          */
         if (!filterMatches) {
-            this.#emit('continue', request.request.request)
-            return this.#release(request, false, () => this.#browser.networkProvideResponse({
-                request: request.request.request
-            }).catch(this.#handleNetworkProvideResponseError))
+            return this.#release(request, false, () => {
+                this.#emit('continue', request.request.request)
+                return this.#browser.networkProvideResponse({
+                    request: request.request.request
+                }).catch(this.#handleNetworkProvideResponseError)
+            })
         }
 
         const requestId = request.request.request
@@ -770,13 +795,15 @@ export default class WebDriverInterception {
             this.#respondOverwrites.length === 0 ||
             !this.#respondOverwrites[0].overwrite
         ) {
-            this.#emit('continue', requestId)
-            return this.#release(request, true, () => this.#withBlockedRequestTracking(
-                requestId,
-                this.#browser.networkProvideResponse({
-                    request: requestId
-                }).catch(this.#handleNetworkProvideResponseError)
-            ))
+            return this.#release(request, !this.#yieldsLetThrough(request), () => {
+                this.#emit('continue', requestId)
+                return this.#withBlockedRequestTracking(
+                    requestId,
+                    this.#browser.networkProvideResponse({
+                        request: requestId
+                    }).catch(this.#handleNetworkProvideResponseError)
+                )
+            })
         }
 
         const responseEntry = this.#respondOverwrites[0]
@@ -822,13 +849,15 @@ export default class WebDriverInterception {
         /**
          * continue request as is
          */
-        this.#emit('continue', requestId)
-        return this.#release(request, true, () => this.#withBlockedRequestTracking(
-            requestId,
-            this.#browser.networkProvideResponse({
-                request: requestId
-            }).catch(this.#handleNetworkProvideResponseError)
-        ))
+        return this.#release(request, true, () => {
+            this.#emit('continue', requestId)
+            return this.#withBlockedRequestTracking(
+                requestId,
+                this.#browser.networkProvideResponse({
+                    request: requestId
+                }).catch(this.#handleNetworkProvideResponseError)
+            )
+        })
     }
 
     async #handleResponseCompleted(response: Response) {
@@ -1147,7 +1176,6 @@ export default class WebDriverInterception {
         this.#hasOneResponseCollected = false
         this.#hasOneBodyReadStarted = false
         this.#blockedRequests.clear()
-        this.#requestsRespondedWithoutFetch.clear()
         return this
     }
 
