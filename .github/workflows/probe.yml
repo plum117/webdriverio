@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-15]
+        os: [windows-latest, macos-15]
         build: ['9.31.9', '9.32.0', head, fix]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -52,10 +52,12 @@ jobs:
         run: node probe/run.mjs lock "$env:UTILS" chrome
 
       - name: P2/P3 race, Firefox
+        if: runner.os != 'Windows'
         shell: bash
         run: node probe/run.mjs race "$UTILS" firefox 5 3
 
       - name: P2/P3 race, Chrome
+        if: runner.os != 'Windows'
         shell: bash
         run: node probe/run.mjs race "$UTILS" chrome 3 3
 

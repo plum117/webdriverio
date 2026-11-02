@@ -4,6 +4,8 @@
 param([string]$Root, [string]$Pattern)
 $ErrorActionPreference = 'SilentlyContinue'
 $start = Get-Date
+Write-Output READY
+[Console]::Out.Flush()
 while ($true) {
     $dirs = Get-ChildItem -LiteralPath $Root -Directory
     $archive = Get-ChildItem -LiteralPath $Root -File -Filter $Pattern | Select-Object -First 1

@@ -45,11 +45,16 @@ function hold (cacheDir) {
     let out = ''
     ps.stdout.on('data', (d) => { out += d })
     ps.stderr.on('data', (d) => { out += d })
+    const ready = new Promise((resolve) => {
+        const check = () => out.includes('READY') ? resolve() : setTimeout(check, 50)
+        check()
+    })
     return {
+        ready,
         async stop () {
             ps.kill()
             await new Promise((r) => ps.once('close', r).once('error', r))
-            return out.trim().split(/\r?\n/).filter(Boolean)
+            return out.trim().split(/\r?\n/).filter((l) => l && l !== 'READY')
         }
     }
 }
@@ -63,6 +68,7 @@ const write = (row) => {
 if (mode === 'lock') {
     const cacheDir = newCache()
     const holder = hold(cacheDir)
+    await holder.ready
     const run1 = await install(cacheDir)
     const holderLog = await holder.stop()
     const run2 = await install(cacheDir)
