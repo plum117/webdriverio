@@ -1,0 +1,66 @@
+name: v9 archive cleanup probe
+
+# Temporary probe on the fork, never merged: real browser installs with @wdio/utils
+# 9.31.9, 9.32.0, v9 HEAD and the #16345 fix when the delete of the downloaded archive fails.
+on:
+  push:
+    branches: [test/v9-archive-cleanup-probe]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.os }} / ${{ matrix.build }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-15]
+        build: ['9.31.9', '9.32.0', head, fix]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      RESULTS: ${{ github.workspace }}/results-${{ matrix.os }}-${{ matrix.build }}.jsonl
+      LABEL: ${{ matrix.build }}
+      UTILS: ${{ github.workspace }}/app/node_modules/@wdio/utils/build/node.js
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Install @wdio/utils ${{ matrix.build }}
+        shell: bash
+        run: |
+          mkdir app && cd app && npm init -y > /dev/null
+          case "${{ matrix.build }}" in
+            head|fix) spec="../tarballs/wdio-utils-${{ matrix.build }}.tgz" ;;
+            *) spec="@wdio/utils@${{ matrix.build }}" ;;
+          esac
+          npm i --no-audit --no-fund "$spec"
+          grep '"version"' node_modules/@wdio/utils/package.json node_modules/@puppeteer/browsers/package.json
+          echo "fix markers: $(grep -c isInstalledDespiteArchiveCleanup node_modules/@wdio/utils/build/node.js || true)"
+
+      - name: P1 real lock, Firefox
+        if: runner.os == 'Windows'
+        run: node probe/run.mjs lock "$env:UTILS" firefox
+
+      - name: P1 real lock, Chrome
+        if: runner.os == 'Windows'
+        run: node probe/run.mjs lock "$env:UTILS" chrome
+
+      - name: P2/P3 race, Firefox
+        shell: bash
+        run: node probe/run.mjs race "$UTILS" firefox 5 3
+
+      - name: P2/P3 race, Chrome
+        shell: bash
+        run: node probe/run.mjs race "$UTILS" chrome 3 3
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: results-${{ matrix.os }}-${{ matrix.build }}
+          path: results-*.jsonl
